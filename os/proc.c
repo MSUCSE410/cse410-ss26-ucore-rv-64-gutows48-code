@@ -34,6 +34,8 @@ void proc_init(void)
 		/*
 		* LAB1: you may need to initialize your new fields of proc here
 		*/
+		p->start_cycle = 0; // Q: Initial start timestamp (cycle counter).
+	
 	}
 	idle.kstack = (uint64)boot_stack_top;
 	idle.pid = 0;
@@ -84,6 +86,12 @@ void scheduler(void)
 				/*
 				* LAB1: you may need to init proc start time here
 				*/
+				extern uint64 get_cycle(); // Q: Declare get_cycle() 
+				if (!p->start_cycle_inited) { // Q: Only set the start time once per process lifetime.
+					p->start_cycle = get_cycle();// Q: Record cycle counter at first time this process is scheduled to RUNNING.
+					p->start_cycle_inited = 1; // Q: Mark initialized so we don’t overwrite start_cycle later.
+				}
+
 				p->state = RUNNING;
 				current_proc = p;
 				swtch(&idle.context, &p->context);

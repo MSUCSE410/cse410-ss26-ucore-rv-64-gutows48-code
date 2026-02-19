@@ -51,6 +51,12 @@ int run_all_app()
 		/*
 		* LAB1: you may need to initialize your new fields of proc here
 		*/
+		memset(p->syscall_times, 0, sizeof(p->syscall_times)); // Q: reset per-task syscall counters.
+		p->start_cycle = 0;  // Q: clear start time baseline.
+		p->start_cycle_inited = 0;  // Q: mark start time not set yet.
+
+
+	
 	}
 	return 0;
 }

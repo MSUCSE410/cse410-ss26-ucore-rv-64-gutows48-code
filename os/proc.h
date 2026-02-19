@@ -4,7 +4,6 @@
 #include "types.h"
 
 #define NPROC (16)
-
 // Saved registers for kernel context switches.
 struct context {
 	uint64 ra;
@@ -38,11 +37,15 @@ struct proc {
 	/*
 	* LAB1: you may need to add some new fields here
 	*/
+	uint32 syscall_times[500]; // Q: Per-task syscall counters (0..499); sized here so it compiles before MAX_SYSCALL_NUM define.
+	uint64 start_cycle;  // Q: saves cycle counter when tas starts (used to compute time in ms).
+	int start_cycle_inited; // Q: Flag so start_cycle is set only once
 };
 
 /*
 * LAB1: you may need to define struct for TaskInfo here
 */
+#define MAX_SYSCALL_NUM 500 // Q:constant used by syscall.c/proc.c loops to iterate over syscall_times[].
 
 struct proc *curr_proc();
 void exit(int);

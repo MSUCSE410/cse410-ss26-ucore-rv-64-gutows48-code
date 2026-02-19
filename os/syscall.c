@@ -35,10 +35,48 @@ uint64 sys_gettimeofday(TimeVal *val, int _tz)
 	val->usec = (cycle % CPU_FREQ) * 1000000 / CPU_FREQ;
 	return 0;
 }
-
 /*
 * LAB1: you may need to define sys_task_info here
 */
+uint64 sys_getpid()   // Q: Returns the PID of the current process.
+{
+	return (uint64)curr_proc()->pid; // Q: from the PCB.
+}
+#ifndef MAX_SYSCALL_NUM                 
+#define MAX_SYSCALL_NUM 500 
+#endif           
+//Line 49-60 were pulled from user/stddef.h to match layout 
+typedef enum {   // Kernel copy of TaskStatus matching user/stddef.h order.
+	UnInit,     // Uninitialized.
+	Ready,      
+	Running,              
+	Exited,                             
+} TaskStatus; // Status enum for TaskInfo.
+
+typedef struct {   
+	TaskStatus status;  
+	unsigned int syscall_times[MAX_SYSCALL_NUM]; // Syscall counters cant be negitive.
+	int time;    
+} TaskInfo;      // Returned by SYS_taskinfo.
+
+static uint64 sys_task_info(TaskInfo *ti) // Q: Fill TaskInfo for the current task.
+{ 
+	struct proc *p = curr_proc();  // Q: Current process.
+	ti->status = Running;   // Q: Current task is running when it calls syscall.
+
+	for (int i = 0; i < MAX_SYSCALL_NUM; i++)   // Q: Copy syscall counters to user struct.
+		ti->syscall_times[i] = p->syscall_times[i]; // Q: Mirror count
+
+	uint64 now = get_cycle();   // Q: Current cycle count.
+	if (!p->start_cycle_inited) { // Q: if not initialized, initialize here too.
+		p->start_cycle = now;  // Q: Set start cycle.
+		p->start_cycle_inited = 1;  // Q: Mark initialized.
+	}
+	uint64 delta = now - p->start_cycle; // Q: count Cycles since first run.
+	ti->time = (int)(delta * 1000 / CPU_FREQ); // Q: Convert cycles to milliseconds.
+
+	return 0;
+}
 
 extern char trap_page[];
 
@@ -53,6 +91,9 @@ void syscall()
 	/*
 	* LAB1: you may need to update syscall counter for task info here
 	*/
+	if (id >= 0 && id < MAX_SYSCALL_NUM) // Q: Only count syscall IDs in range.
+		curr_proc()->syscall_times[id]++;  // Q: Increment per-task counter (includes SYS_taskinfo itself).
+
 	switch (id) {
 	case SYS_write:
 		ret = sys_write(args[0], (char *)args[1], args[2]);
@@ -64,11 +105,18 @@ void syscall()
 		ret = sys_sched_yield();
 		break;
 	case SYS_gettimeofday:
-		ret = sys_gettimeofday((TimeVal *)args[0], args[1]);
+		ret = sys_gettimeofday((TimeVal *)args[0], args[1	]);
+		break;
+	case SYS_getpid:              // Q: Handle syscall 172 so tests stop failing.
+		ret = (int)sys_getpid();  // Q: Return pid in a0.
 		break;
 	/*
 	* LAB1: you may need to add SYS_taskinfo case here
 	*/
+//This is the “router” that connects the syscall number 410 to the kernel code that fills a TaskInfo struct for the current process.
+	case SYS_taskinfo: // Q: Handle syscall 410 for task info.
+		ret = (int)sys_task_info((TaskInfo *)args[0]); // Q: Fill TaskInfo at user pointer.
+		break;
 	default:
 		ret = -1;
 		errorf("unknown syscall %d", id);
