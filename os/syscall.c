@@ -229,7 +229,7 @@ void syscall()
 	struct trapframe *trapframe = curr_proc()->trapframe;
 	int id = trapframe->a7, ret;
 	uint64 args[6] = { trapframe->a0, trapframe->a1, trapframe->a2,
-			   trapframe->a3, trapframe->a4, trapframe->a5 };
+			   trapframe->a3, trapframe->a4, trapframe->a5 };//comment
 	tracef("syscall %d args = [%x, %x, %x, %x, %x, %x]", id, args[0],
 	       args[1], args[2], args[3], args[4], args[5]);
 
