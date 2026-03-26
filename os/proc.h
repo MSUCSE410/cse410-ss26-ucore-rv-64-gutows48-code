@@ -1,17 +1,17 @@
 #ifndef PROC_H
 #define PROC_H
 
-#include "riscv.h"
 #include "types.h"
+#include "vm.h" 
 
 #define NPROC (16)
+#define MAX_SYSCALL_NUM 500
 
 // Saved registers for kernel context switches.
 struct context {
 	uint64 ra;
 	uint64 sp;
 
-	// callee-saved
 	uint64 s0;
 	uint64 s1;
 	uint64 s2;
@@ -30,22 +30,20 @@ enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 // Per-process state
 struct proc {
-	enum procstate state; // Process state
-	int pid; // Process ID
-	pagetable_t pagetable; // User page table
+	enum procstate state;
+	int pid;
 	uint64 ustack;
-	uint64 kstack; // Virtual address of kernel stack
-	struct trapframe *trapframe; // data page for trampoline.S
-	struct context context; // swtch() here to run process
-	uint64 max_page;
-	/*
-	* LAB1: you may need to add some new fields here
-	*/
-};
+	uint64 kstack;
+	struct trapframe *trapframe;
+	struct context context;
 
-/*
-* LAB1: you may need to define struct for TaskInfo here
-*/
+	pagetable_t pagetable; //Q store current process user page table 
+	uint64 max_page; //Q tracks page size 
+
+	uint32 syscall_times[MAX_SYSCALL_NUM]; //Q counts system calls
+	uint64 start_cycle; //stores cycle count when process starts 
+	int start_cycle_inited; //keeps track for kernal if start cycle has been set
+};
 
 struct proc *curr_proc();
 void exit(int);
@@ -54,7 +52,6 @@ void scheduler() __attribute__((noreturn));
 void sched();
 void yield();
 struct proc *allocproc();
-// swtch.S
 void swtch(struct context *, struct context *);
 
 #endif // PROC_H

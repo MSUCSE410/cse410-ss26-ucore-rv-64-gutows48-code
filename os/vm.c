@@ -35,7 +35,7 @@ void kvm_init(void)
 }
 
 // Return the address of the PTE in page table pagetable
-// that corresponds to virtual address va.  If alloc!=0,
+// that corresponds to virtual address va. If alloc!=0,
 // create any required page-table pages.
 //
 // The risc-v Sv39 scheme has three levels of page-table
@@ -87,7 +87,7 @@ uint64 walkaddr(pagetable_t pagetable, uint64 va)
 	return pa;
 }
 
-// Look up a virtual address, return the physical address,
+// Look up a virtual address, return the physical address.
 uint64 useraddr(pagetable_t pagetable, uint64 va)
 {
 	uint64 page = walkaddr(pagetable, va);
@@ -191,7 +191,7 @@ void freewalk(pagetable_t pagetable)
 			freewalk((pagetable_t)child);
 			pagetable[i] = 0;
 		} else if (pte & PTE_V) {
-			panic("freewalk: leaf");
+			panic("freewalk: leaf"); //Q
 		}
 	}
 	kfree((void *)pagetable);
@@ -200,12 +200,16 @@ void freewalk(pagetable_t pagetable)
 /**
  * @brief Free user memory pages, then free page-table pages.
  *
- * @param max_page The max vaddr of user-space.
+ * @param max_page Number of user pages mapped from VA 0 upward.
  */
 void uvmfree(pagetable_t pagetable, uint64 max_page)
 {
 	if (max_page > 0)
 		uvmunmap(pagetable, 0, max_page, 1);
+
+	uvmunmap(pagetable, TRAPFRAME, 1, 0);  //Q unmap trapframe page from this process
+	uvmunmap(pagetable, TRAMPOLINE, 1, 0); //Q unmap trampoline page from this process
+
 	freewalk(pagetable);
 }
 

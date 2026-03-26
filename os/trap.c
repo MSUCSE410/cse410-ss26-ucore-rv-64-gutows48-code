@@ -11,7 +11,8 @@ void kerneltrap()
 {
 	if ((r_sstatus() & SSTATUS_SPP) == 0)
 		panic("kerneltrap: not from supervisor mode");
-	panic("trap from kerne");
+	errorf("kernel trap: scause=%p sepc=%p stval=%p", r_scause(), r_sepc(), r_stval()); //Q
+	panic("trap from kernel"); //Q
 }
 
 // set up to take exceptions and traps while in the kernel.
