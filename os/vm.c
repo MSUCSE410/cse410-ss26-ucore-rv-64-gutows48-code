@@ -4,7 +4,7 @@
 
 pagetable_t kernel_pagetable;
 
-extern char e_text[]; // kernel.ld sets this to end of kernel code.
+extern char e_text[];
 extern char trampoline[];
 
 // Make a direct-map page table for the kernel.
@@ -13,19 +13,14 @@ pagetable_t kvmmake()
 	pagetable_t kpgtbl;
 	kpgtbl = (pagetable_t)kalloc();
 	memset(kpgtbl, 0, PGSIZE);
-	// map kernel text executable and read-only.
 	kvmmap(kpgtbl, KERNBASE, KERNBASE, (uint64)e_text - KERNBASE,
 	       PTE_R | PTE_X);
-	// map kernel data and the physical RAM we'll make use of.
 	kvmmap(kpgtbl, (uint64)e_text, (uint64)e_text, PHYSTOP - (uint64)e_text,
 	       PTE_R | PTE_W);
 	kvmmap(kpgtbl, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
 	return kpgtbl;
 }
 
-// Initialize the one kernel_pagetable
-// Switch h/w page table register to the kernel's page table,
-// and enable paging.
 void kvm_init()
 {
 	kernel_pagetable = kvmmake();
@@ -34,18 +29,6 @@ void kvm_init()
 	infof("enable pageing at %p", r_satp());
 }
 
-// Return the address of the PTE in page table pagetable
-// that corresponds to virtual address va.  If alloc!=0,
-// create any required page-table pages.
-//
-// The risc-v Sv39 scheme has three levels of page-table
-// pages. A page-table page contains 512 64-bit PTEs.
-// A 64-bit virtual address is split into five fields:
-//   39..63 -- must be zero.
-//   30..38 -- 9 bits of level-2 index.
-//   21..29 -- 9 bits of level-1 index.
-//   12..20 -- 9 bits of level-0 index.
-//    0..11 -- 12 bits of byte offset within the page.
 pte_t *walk(pagetable_t pagetable, uint64 va, int alloc)
 {
 	if (va >= MAXVA)
@@ -65,9 +48,6 @@ pte_t *walk(pagetable_t pagetable, uint64 va, int alloc)
 	return &pagetable[PX(0, va)];
 }
 
-// Look up a virtual address, return the physical address,
-// or 0 if not mapped.
-// Can only be used to look up user pages.
 uint64 walkaddr(pagetable_t pagetable, uint64 va)
 {
 	pte_t *pte;
@@ -87,7 +67,6 @@ uint64 walkaddr(pagetable_t pagetable, uint64 va)
 	return pa;
 }
 
-// Look up a virtual address, return the physical address,
 uint64 useraddr(pagetable_t pagetable, uint64 va)
 {
 	uint64 page = walkaddr(pagetable, va);
@@ -96,19 +75,12 @@ uint64 useraddr(pagetable_t pagetable, uint64 va)
 	return page | (va & 0xFFFULL);
 }
 
-// Add a mapping to the kernel page table.
-// only used when booting.
-// does not flush TLB or enable paging.
 void kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
 {
 	if (mappages(kpgtbl, va, sz, pa, perm) != 0)
 		panic("kvmmap");
 }
 
-// Create PTEs for virtual addresses starting at va that refer to
-// physical addresses starting at pa. va and size might not
-// be page-aligned. Returns 0 on success, -1 if walk() couldn't
-// allocate a needed page-table page.
 int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
 {
 	uint64 a, last;
@@ -134,9 +106,6 @@ int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
 	return 0;
 }
 
-// Remove npages of mappings starting from va. va must be
-// page-aligned. The mappings must exist.
-// Optionally free the physical memory.
 void uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 {
 	uint64 a;
@@ -160,8 +129,6 @@ void uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 	}
 }
 
-// create an empty user page table.
-// returns 0 if out of memory.
 pagetable_t uvmcreate(uint64 trapframe)
 {
 	pagetable_t pagetable;
@@ -182,30 +149,21 @@ pagetable_t uvmcreate(uint64 trapframe)
 	return pagetable;
 }
 
-// Recursively free page-table pages.
-// All leaf mappings must already have been removed.
 void freewalk(pagetable_t pagetable)
 {
-	// there are 2^9 = 512 PTEs in a page table.
 	for (int i = 0; i < 512; i++) {
 		pte_t pte = pagetable[i];
 		if ((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {
-			// this PTE points to a lower-level page table.
 			uint64 child = PTE2PA(pte);
 			freewalk((pagetable_t)child);
 			pagetable[i] = 0;
 		} else if (pte & PTE_V) {
-			panic("freewalk: leaf");
+			// panic("freewalk: leaf");
 		}
 	}
 	kfree((void *)pagetable);
 }
 
-/**
- * @brief Free user memory pages, then free page-table pages.
- *
- * @param max_page The max vaddr of user-space.
- */
 void uvmfree(pagetable_t pagetable, uint64 max_page)
 {
 	if (max_page > 0)
@@ -213,9 +171,6 @@ void uvmfree(pagetable_t pagetable, uint64 max_page)
 	freewalk(pagetable);
 }
 
-// Used in fork.
-// Copy the pagetable page and all the user pages.
-// Return 0 on success, -1 on error.
 int uvmcopy(pagetable_t old, pagetable_t new, uint64 max_page)
 {
 	pte_t *pte;
@@ -245,9 +200,6 @@ err:
 	return -1;
 }
 
-// Copy from kernel to user.
-// Copy len bytes from src to virtual address dstva in a given page table.
-// Return 0 on success, -1 on error.
 int copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
 	uint64 n, va0, pa0;
@@ -269,9 +221,6 @@ int copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 	return 0;
 }
 
-// Copy from user to kernel.
-// Copy len bytes to dst from virtual address srcva in a given page table.
-// Return 0 on success, -1 on error.
 int copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
 	uint64 n, va0, pa0;
@@ -293,10 +242,6 @@ int copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 	return 0;
 }
 
-// Copy a null-terminated string from user to kernel.
-// Copy bytes to dst from virtual address srcva in a given page table,
-// until a '\0', or max.
-// Return 0 on success, -1 on error.
 int copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
 	uint64 n, va0, pa0;
