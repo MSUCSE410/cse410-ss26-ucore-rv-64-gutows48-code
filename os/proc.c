@@ -4,6 +4,7 @@
 #include "trap.h"
 #include "vm.h"
 #include "queue.h"
+#include "timer.h" 
 
 struct proc pool[NPROC];
 __attribute__((aligned(16))) char kstack[NPROC][PAGE_SIZE];
@@ -14,14 +15,14 @@ struct proc *current_proc;
 struct proc idle;
 struct queue task_queue;
 
+int cpuid()
+{
+	return 0; //Q CH6: current labs run with a single CPU/hart, so hart id is always 0
+}
+
 int threadid()
 {
 	return curr_proc()->pid;
-}
-
-int cpuid()
-{
-	return 0;
 }
 
 struct proc *curr_proc()
@@ -29,17 +30,82 @@ struct proc *curr_proc()
 	return current_proc;
 }
 
-// initialize the proc table at boot time.
+static uint64 calc_pass(int priority) 
+{
+	if (priority < 2) 
+		priority = 16; 
+	return BIG_STRIDE / (uint64)priority; 
+}
+
+int fdalloc(struct file *f)
+{
+	struct proc *p = curr_proc(); //Q CH6: install a file into the current process fd table
+
+	for (int i = 3; i < FD_BUFFER_SIZE; ++i) { //Q CH6: reserve 0,1,2 for stdio
+		if (p->files[i] == 0) { //Q CH6: first empty descriptor slot wins
+			p->files[i] = f; //Q CH6: bind file discriptor to system-level file object
+			return i; //Q CH6: return allocated file descriptor number
+		}
+	}
+	return -1; //Q CH6: no free fd slot available in this process
+}
+
+static void init_stdio(struct proc *p) //Q CH6: every fresh process needs stdin/stdout/stderr open
+{
+	p->files[STDIN] = stdio_init(STDIN); //Q CH6: attach console-backed stdin
+	p->files[STDOUT] = stdio_init(STDOUT); //Q CH6: attach console-backed stdout
+	p->files[STDERR] = stdio_init(STDERR); //Q CH6: attach console-backed stderr
+}
+
+static void close_all_files(struct proc *p) //Q CH6: helper to properly drop all file refs held by a process
+{
+	for (int i = 0; i < FD_BUFFER_SIZE; ++i) {
+		if (p->files[i]) {
+			fileclose(p->files[i]); //Q CH6: release file object reference instead of leaking it
+			p->files[i] = 0; //Q CH6: clear process file discriptor slot after close
+		}
+	}
+}
+
 void proc_init()
 {
 	struct proc *p;
 	for (p = pool; p < &pool[NPROC]; p++) {
 		p->state = UNUSED;
 		p->kstack = (uint64)kstack[p - pool];
+		p->ustack = 0;
 		p->trapframe = (struct trapframe *)trapframe[p - pool];
+		p->pagetable = 0;
+		p->max_page = 0;
+		p->parent = NULL; 
+		p->exit_code = 0; 
+		for (int i = 0; i < FD_BUFFER_SIZE; ++i) //Q CH6: clear per-process file discriptor table
+			p->files[i] = 0;
+		p->start_cycle = 0; 
+		p->start_cycle_inited = 0; 
+		memset(p->syscall_times, 0, sizeof(p->syscall_times)); 
+		p->stride = 0; 
+		p->priority = 16; 
+		p->pass = calc_pass(p->priority); 
 	}
+
 	idle.kstack = (uint64)boot_stack_top;
+	idle.ustack = 0;
+	idle.trapframe = 0;
+	idle.pagetable = 0;
+	idle.max_page = 0;
+	idle.parent = NULL; 
+	idle.exit_code = 0; 
+	for (int i = 0; i < FD_BUFFER_SIZE; ++i) //Q CH6: idle process has no open files
+		idle.files[i] = 0;
 	idle.pid = IDLE_PID;
+	idle.start_cycle = 0; 
+	idle.start_cycle_inited = 0; 
+	memset(idle.syscall_times, 0, sizeof(idle.syscall_times)); 
+	idle.stride = 0; 
+	idle.priority = 16; 
+	idle.pass = calc_pass(idle.priority); 
+
 	current_proc = &idle;
 	init_queue(&task_queue);
 }
@@ -50,106 +116,85 @@ int allocpid()
 	return PID++;
 }
 
-struct proc *fetch_task()
+struct proc *pop_task()
 {
-	int index = pop_queue(&task_queue);
-	if (index < 0) {
-		debugf("No task to fetch\n");
-		return NULL;
-	}
-	debugf("fetch task %d(pid=%d) from task queue\n", index,
-	       pool[index].pid);
-	return pool + index;
+	return 0; 
 }
 
 void add_task(struct proc *p)
 {
-	push_queue(&task_queue, p - pool);
-	debugf("add task %d(pid=%d) to task queue\n", p - pool, p->pid);
+	if (p == 0) 
+		return;
+	if (p->state != UNUSED && p->state != ZOMBIE)
+		p->state = RUNNABLE; 
 }
 
-// Look in the process table for an UNUSED proc.
-// If found, initialize state required to run in the kernel.
-// If there are no free procs, or a memory allocation fails, return 0.
 struct proc *allocproc()
 {
 	struct proc *p;
 	for (p = pool; p < &pool[NPROC]; p++) {
-		if (p->state == UNUSED) {
+		if (p->state == UNUSED)
 			goto found;
-		}
 	}
 	return 0;
 
 found:
-	// init proc
 	p->pid = allocpid();
 	p->state = USED;
 	p->ustack = 0;
 	p->max_page = 0;
-	p->parent = NULL;
-	p->exit_code = 0;
-	p->pagetable = uvmcreate((uint64)p->trapframe);
+	p->parent = NULL; 
+	p->exit_code = 0; 
+	for (int i = 0; i < FD_BUFFER_SIZE; ++i) //Q CH6: start with no open files before stdio init
+		p->files[i] = 0;
+	init_stdio(p); //Q 
+	p->pagetable = uvmcreate((uint64)p->trapframe); 
 	memset(&p->context, 0, sizeof(p->context));
 	memset((void *)p->kstack, 0, KSTACK_SIZE);
 	memset((void *)p->trapframe, 0, TRAP_PAGE_SIZE);
-	memset((void *)p->files, 0, sizeof(struct file *) * FD_BUFFER_SIZE);
 	p->context.ra = (uint64)usertrapret;
 	p->context.sp = p->kstack + KSTACK_SIZE;
+	p->start_cycle = 0; 
+	p->start_cycle_inited = 0; 
+	memset(p->syscall_times, 0, sizeof(p->syscall_times));
+	p->stride = 0; 
+	p->priority = 16; 
+	p->pass = calc_pass(p->priority); 
 	return p;
 }
 
-int init_stdio(struct proc *p)
-{
-	for (int i = 0; i < 3; i++) {
-		if (p->files[i] != NULL) {
-			return -1;
-		}
-		p->files[i] = stdio_init(i);
-	}
-	return 0;
-}
-
-// Scheduler never returns.  It loops, doing:
-//  - choose a process to run.
-//  - swtch to start running that process.
-//  - eventually that process transfers control
-//    via swtch back to the scheduler.
 void scheduler()
 {
 	struct proc *p;
+	struct proc *best;
+
 	for (;;) {
-		/*int has_proc = 0;
+		best = 0; 
 		for (p = pool; p < &pool[NPROC]; p++) {
-			if (p->state == RUNNABLE) {
-				has_proc = 1;
-				tracef("swtich to proc %d", p - pool);
-				p->state = RUNNING;
-				current_proc = p;
-				swtch(&idle.context, &p->context);
+			if (p->state != RUNNABLE) 
+				continue;
+
+			if (best == 0 || p->stride < best->stride ||
+			    (p->stride == best->stride && p->pid < best->pid)) {
+				best = p; 
 			}
 		}
-		if(has_proc == 0) {
+
+		if (best == 0)
 			panic("all app are over!\n");
-		}*/
-		p = fetch_task();
-		if (p == NULL) {
-			panic("all app are over!\n");
+
+		if (!best->start_cycle_inited) { 
+			best->start_cycle = get_cycle(); 
+			best->start_cycle_inited = 1; 
 		}
-		tracef("swtich to proc %d", p - pool);
-		p->state = RUNNING;
-		current_proc = p;
-		swtch(&idle.context, &p->context);
+
+		best->state = RUNNING;
+		current_proc = best;
+		best->stride += best->pass; 
+		swtch(&idle.context, &best->context);
 	}
 }
 
-// Switch to scheduler.  Must hold only p->lock
-// and have changed proc->state. Saves and restores
-// intena because intena is a property of this
-// kernel thread, not this CPU. It should
-// be proc->intena and proc->noff, but that would
-// break in the few places where a lock is held but
-// there's no process.
 void sched()
 {
 	struct proc *p = curr_proc();
@@ -158,16 +203,12 @@ void sched()
 	swtch(&p->context, &idle.context);
 }
 
-// Give up the CPU for one scheduling round.
 void yield()
 {
 	current_proc->state = RUNNABLE;
-	add_task(current_proc);
 	sched();
 }
 
-// Free a process's page table, and free the
-// physical memory it refers to.
 void freepagetable(pagetable_t pagetable, uint64 max_page)
 {
 	uvmunmap(pagetable, TRAMPOLINE, 1, 0);
@@ -179,12 +220,19 @@ void freeproc(struct proc *p)
 {
 	if (p->pagetable)
 		freepagetable(p->pagetable, p->max_page);
+
 	p->pagetable = 0;
-	for (int i = 0; i > FD_BUFFER_SIZE; i++) {
-		if (p->files[i] != NULL) {
-			fileclose(p->files[i]);
-		}
-	}
+	p->ustack = 0;
+	p->max_page = 0;
+	p->parent = NULL; 
+	p->exit_code = 0; 
+	close_all_files(p); //Q CH6: close all descriptors instead of silently dropping them
+	p->start_cycle = 0; 
+	p->start_cycle_inited = 0; 
+	memset(p->syscall_times, 0, sizeof(p->syscall_times)); 
+	p->stride = 0; 
+	p->priority = 16; 
+	p->pass = calc_pass(p->priority); 
 	p->state = UNUSED;
 }
 
@@ -192,83 +240,53 @@ int fork()
 {
 	struct proc *np;
 	struct proc *p = curr_proc();
-	int i;
-	// Allocate process.
-	if ((np = allocproc()) == 0) {
-		panic("allocproc\n");
-	}
-	// Copy user memory from parent to child.
+
+	if ((np = allocproc()) == 0)
+		return -1;
+
 	if (uvmcopy(p->pagetable, np->pagetable, p->max_page) < 0) {
-		panic("uvmcopy\n");
+		freeproc(np); 
+		return -1;
 	}
+
 	np->max_page = p->max_page;
-	// Copy file table to new proc
-	for (i = 0; i < FD_BUFFER_SIZE; i++) {
-		if (p->files[i] != NULL) {
-			// TODO: f->type == STDIO ?
-			p->files[i]->ref++;
-			np->files[i] = p->files[i];
-		}
-	}
-	// copy saved user registers.
 	*(np->trapframe) = *(p->trapframe);
-	// Cause fork to return 0 in the child.
 	np->trapframe->a0 = 0;
 	np->parent = p;
+
+	close_all_files(np); //Q CH6: discard default stdio refs before inheriting parent's actual descriptor table
+	for (int i = 0; i < FD_BUFFER_SIZE; ++i) { //Q CH6: fork should inherit all open file descriptors
+		np->files[i] = p->files[i];
+		if (np->files[i])
+			np->files[i]->ref++; //Q CH6: inherited descriptors share the same system file object
+	}
+
+	np->stride = 0; 
+	np->priority = p->priority; 
+	np->pass = calc_pass(np->priority); 
 	np->state = RUNNABLE;
-	add_task(np);
+	add_task(np); 
 	return np->pid;
 }
 
-int push_argv(struct proc *p, char **argv)
+int exec(char *name)
 {
-	uint64 argc, ustack[MAX_ARG_NUM + 1];
-	uint64 sp = p->ustack + USTACK_SIZE, spb = p->ustack;
-	// Push argument strings, prepare rest of stack in ustack.
-	for (argc = 0; argv[argc]; argc++) {
-		if (argc >= MAX_ARG_NUM)
-			panic("...");
-		sp -= strlen(argv[argc]) + 1;
-		sp -= sp % 16; // riscv sp must be 16-byte aligned
-		if (sp < spb) {
-			panic("...");
-		}
-		if (copyout(p->pagetable, sp, argv[argc],
-			    strlen(argv[argc]) + 1) < 0) {
-			panic("...");
-		}
-		ustack[argc] = sp;
-	}
-	ustack[argc] = 0;
-	// push the array of argv[] pointers.
-	sp -= (argc + 1) * sizeof(uint64);
-	sp -= sp % 16;
-	if (sp < spb) {
-		panic("...");
-	}
-	if (copyout(p->pagetable, sp, (char *)ustack,
-		    (argc + 1) * sizeof(uint64)) < 0) {
-		panic("...");
-	}
-	p->trapframe->a1 = sp;
-	p->trapframe->sp = sp;
-	// clear files ?
-	return argc; // this ends up in a0, the first argument to main(argc, argv)
-}
-
-int exec(char *path, char **argv)
-{
-	infof("exec : %s\n", path);
-	struct inode *ip;
-	struct proc *p = curr_proc();
-	if ((ip = namei(path)) == 0) {
-		errorf("invalid file name %s\n", path);
+	int id = get_id_by_name(name);
+	if (id < 0)
 		return -1;
-	}
+
+	struct proc *p = curr_proc();
 	uvmunmap(p->pagetable, 0, p->max_page, 1);
-	bin_loader(ip, p);
-	iput(ip);
-	return push_argv(p, argv);
+	p->max_page = 0;
+	p->ustack = 0;
+	p->start_cycle = 0; 
+	p->start_cycle_inited = 0; 
+	memset(p->syscall_times, 0, sizeof(p->syscall_times)); 
+	p->stride = 0; 
+	p->pass = calc_pass(p->priority); 
+
+	loader(id, p);
+	return 0;
 }
 
 int wait(int pid, int *code)
@@ -278,61 +296,58 @@ int wait(int pid, int *code)
 	struct proc *p = curr_proc();
 
 	for (;;) {
-		// Scan through table looking for exited children.
 		havekids = 0;
 		for (np = pool; np < &pool[NPROC]; np++) {
 			if (np->state != UNUSED && np->parent == p &&
 			    (pid <= 0 || np->pid == pid)) {
 				havekids = 1;
 				if (np->state == ZOMBIE) {
-					// Found one.
-					np->state = UNUSED;
 					pid = np->pid;
 					*code = np->exit_code;
+					freeproc(np);
 					return pid;
 				}
 			}
 		}
-		if (!havekids) {
+		if (!havekids)
 			return -1;
-		}
+
 		p->state = RUNNABLE;
-		add_task(p);
 		sched();
 	}
 }
 
-// Exit the current process.
 void exit(int code)
 {
 	struct proc *p = curr_proc();
-	p->exit_code = code;
-	debugf("proc %d exit with %d", p->pid, code);
-	freeproc(p);
-	if (p->parent != NULL) {
-		// Parent should `wait`
-		p->state = ZOMBIE;
-	}
-	// Set the `parent` of all children to NULL
 	struct proc *np;
-	for (np = pool; np < &pool[NPROC]; np++) {
-		if (np->parent == p) {
-			np->parent = NULL;
-		}
-	}
-	sched();
-}
 
-int fdalloc(struct file *f)
-{
-	debugf("debugf f = %p, type = %d", f, f->type);
-	struct proc *p = curr_proc();
-	for (int i = 0; i < FD_BUFFER_SIZE; ++i) {
-		if (p->files[i] == NULL) {
-			p->files[i] = f;
-			debugf("debugf fd = %d, f = %p", i, p->files[i]);
-			return i;
-		}
+	p->exit_code = code;
+	debugf("proc %d exit with %d\n", p->pid, code);
+
+	for (np = pool; np < &pool[NPROC]; np++) {
+		if (np->parent == p)
+			np->parent = NULL; 
 	}
-	return -1;
+
+	if (p->parent != NULL) {
+		if (p->pagetable) {
+			freepagetable(p->pagetable, p->max_page);
+			p->pagetable = 0;
+			p->ustack = 0;
+			p->max_page = 0;
+		}
+		close_all_files(p); //Q CH6: release all open files when process exits
+		p->start_cycle = 0; 
+		p->start_cycle_inited = 0; 
+		memset(p->syscall_times, 0, sizeof(p->syscall_times)); 
+		p->stride = 0; 
+		p->priority = 16; 
+		p->pass = calc_pass(p->priority); 
+		p->state = ZOMBIE; 
+	} else {
+		freeproc(p);
+	}
+
+	sched();
 }
